@@ -858,6 +858,20 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertFalse(store.limitsAuthExpired, "성공 시 해제")
     }
 
+    func testLimitsAuthExpiredSetOnCredentialExpired() async {
+        // 저장된 토큰이 만료돼 서버에 보내기도 전에 걸린 경우도 "세션 만료" 상태여야 한다
+        // (서버 401 과 동일 취급). credentialExpired 가 세션 만료로 안 이어지면 사용자는
+        // 왜 한도가 stale 인지 알 수 없다.
+        let claude = FakeUsageProvider(id: "claude_code", displayName: "Claude Code", daily: todayDaily(10_000_000))
+        let store = UsageStore(providers: [claude],
+                               claudeLimitsProvider: SequenceClaudeLimits(
+                                errors: [LimitsError.credentialExpired(expiresAt: nil)]),
+                               codexLimitsProvider: FakeCodexLimits(status: nil),
+                               autoRefresh: false, defaults: testDefaults)
+        await store.refresh(scheduleEmptyRetry: false)
+        XCTAssertTrue(store.limitsAuthExpired, "만료 자격증명 → 세션 만료 안내 상태")
+    }
+
     func testLimitsAuthExpiredNotSetOnNon401() async {
         let claude = FakeUsageProvider(id: "claude_code", displayName: "Claude Code", daily: todayDaily(10_000_000))
         let store = UsageStore(providers: [claude],
@@ -926,6 +940,13 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(UsageStore.friendlyLimitError(LimitsError.credentialMissingAccountOAuth, l),
                        l.limitRefreshReauthNeeded)
         XCTAssertNotEqual(l.limitRefreshReauthNeeded, l.limitRefreshNoCredential)
+        // 만료 자격증명은 서버 401 과 다른 안내다 — "갱신으로는 못 고친다, CLI 를 실행하라".
+        let expiry = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(UsageStore.friendlyLimitError(LimitsError.credentialExpired(expiresAt: expiry), l),
+                       l.limitRefreshCredentialExpired(expiry))
+        XCTAssertNotEqual(l.limitRefreshCredentialExpired(expiry), l.limitRefreshHTTPError(401))
+        // 만료 시각이 있으면 메시지에 반영돼야 한다(없을 때와 달라야 함).
+        XCTAssertNotEqual(l.limitRefreshCredentialExpired(expiry), l.limitRefreshCredentialExpired(nil))
     }
 
     /// 자격증명 항목이 MCP 서버 OAuth 상태만 담고 계정 토큰(`claudeAiOauth`)은 없는 경우
