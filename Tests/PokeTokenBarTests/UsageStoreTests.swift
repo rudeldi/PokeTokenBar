@@ -882,6 +882,52 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertFalse(store.limitsAuthExpired, "500 은 세션 만료 아님 — 오탐 방지")
     }
 
+    // MARK: 제공자 on/off
+
+    func testProvidersDefaultToEnabled() {
+        let store = makeStore(providers: [
+            FakeUsageProvider(id: "codex", displayName: "Codex", daily: nil),
+        ])
+        XCTAssertTrue(store.isProviderEnabled("codex"), "기본값: 전부 켜짐")
+        XCTAssertTrue(store.isProviderEnabled("anything"), "부재 = 켜짐")
+        XCTAssertEqual(store.allProviderInfo.map(\.id), ["codex"])
+    }
+
+    func testDisabledProviderDropsFromSnapshotsAndSkipsItsLimits() async throws {
+        let codexStatus = try JSONDecoder().decode(CodexRateLimitStatus.self, from: Data("""
+        {"rateLimits":{"limitId":"codex","limitName":null,
+        "primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":1781694161},
+        "secondary":null,"credits":{"hasCredits":false,"unlimited":false,"balance":null},
+        "individualLimit":null,"planType":"pro","rateLimitReachedType":null}}
+        """.utf8))
+        let claude = FakeUsageProvider(id: "claude_code", displayName: "Claude Code", daily: todayDaily(1_000))
+        let codex = FakeUsageProvider(id: "codex", displayName: "Codex", daily: todayDaily(2_000))
+        let store = makeStore(providers: [claude, codex], codex: codexStatus)
+
+        await store.refresh(scheduleEmptyRetry: false)
+        XCTAssertTrue(store.snapshots.contains { $0.providerID == "codex" }, "켜짐: 스냅샷 있음")
+        XCTAssertNotNil(store.codexLimits, "켜짐: Codex 한도 조회됨")
+
+        store.setProvider("codex", enabled: false)   // 동기적으로 스냅샷·한도 정리 + refresh 트리거
+        await store.refresh(scheduleEmptyRetry: false)
+
+        XCTAssertFalse(store.isProviderEnabled("codex"))
+        XCTAssertFalse(store.snapshots.contains { $0.providerID == "codex" },
+                       "끈 제공자는 스냅샷을 재조립하지 않는다")
+        XCTAssertNil(store.codexLimits, "끈 Codex → app-server 조회 안 함, 한도 비움")
+        XCTAssertTrue(store.snapshots.contains { $0.providerID == "claude_code" },
+                      "다른 제공자는 영향 없음")
+    }
+
+    func testDisabledProviderPersistsAcrossStoreReload() async {
+        let claude = FakeUsageProvider(id: "claude_code", displayName: "Claude Code", daily: todayDaily(1_000))
+        let store = makeStore(providers: [claude])
+        store.setProvider("claude_code", enabled: false)
+        // 같은 defaults 로 새 스토어 → 저장된 disabled 집합을 읽어와야 한다.
+        let reloaded = makeStore(providers: [claude])
+        XCTAssertFalse(reloaded.isProviderEnabled("claude_code"), "끈 상태가 재시작에도 유지")
+    }
+
     func testIsStaleBeforeFirstRefreshThenFreshAfter() async {
         let claude = FakeUsageProvider(id: "claude_code", displayName: "Claude Code", daily: todayDaily(10_000_000))
         let store = makeStore(providers: [claude])
