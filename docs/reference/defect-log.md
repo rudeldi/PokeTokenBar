@@ -198,6 +198,24 @@ read_when:
   회귀 테스트도 **그 await 를 실제로 지나는 진입점**으로 써라 — `hatch(baseID:)` 경로 테스트는
   `chooseBase()` 를 안 지나 통과하면서 아무것도 지키지 않았다(`testImportDuringSpeciesRollDiscardsTheHatch`).
 
+- **Never hand a `@MainActor`-inherited closure to a callback API that fires off the main thread.**
+  A closure written inside a `@MainActor` type inherits that isolation even when it is empty. If the
+  framework invokes it on its own queue, Swift 6's runtime isolation check (`swift_task_checkIsolated`)
+  traps and the process dies with SIGTRAP — no catchable error, no log line of our own. Observed with
+  `UNUserNotificationCenter.requestAuthorization(options:) { _, _ in }` in `UsageStore`
+  (`UNUserNotificationServiceConnection.call-out` queue): the app died ~13s after the first popover open,
+  every launch. Use the `async` API from a `Task.detached` so there is no isolation to violate.
+  **Toolchain-dependent, so CI green is not evidence.** Older toolchains only log
+  "data race detected"; the trap became the default with newer ones (reproduced on Swift 6.1.2 with the
+  macOS 26 SDK, silent on the toolchain that builds the release binaries). A local release build can
+  therefore crash on a code path the published build survives.
+  **Not reachable from unit tests** — it needs the real UserNotifications framework and its call-out
+  queue. Verified with a standalone bundled probe running both spellings on the same toolchain:
+  trailing-closure `exit 133` (SIGTRAP), `Task.detached` + `async` `exit 0`. Sweep the class by grepping
+  for completion-handler APIs used inside `@MainActor` types (`dataTask`, `addObserver(forName:queue:)`,
+  `DispatchQueue.*.async`, `asyncAfter`); at the time of the fix every other call site either passed
+  `queue: .main` or sat in a non-isolated type.
+
 ## 프로세스·인스턴스
 
 - **로그인 실행을 LaunchAgent 로 등록하면 "등록하는 순간" 앱이 한 번 더 뜬다.** plist 의 `RunAtLoad` 는

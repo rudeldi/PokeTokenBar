@@ -815,7 +815,14 @@ final class UsageStore {
         guard !notifAuthRequested else { return }
         guard AppEnv.isBundledApp else { return }
         notifAuthRequested = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // UN invokes the completion handler on its own call-out queue. Inside this @MainActor type
+        // the closure inherits MainActor isolation, so Swift 6's runtime isolation check
+        // (swift_task_checkIsolated) traps with SIGTRAP when it fires off the main thread.
+        // The async API in a detached task has no isolation to violate.
+        Task.detached {
+            _ = try? await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])
+        }
     }
 
     /// 한도 알림 1건의 발화 지시(순수 판정 결과). 부수효과와 분리해 테스트 가능하게.
