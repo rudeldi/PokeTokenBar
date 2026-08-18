@@ -109,6 +109,34 @@ final class UsageStore {
         }
     }
 
+    /// 사용자가 **끈** 프로바이더 id 집합. 부재 = 켜짐(기본값: 전부 켜짐)이라 기존 설치·테스트는 무영향.
+    /// plist 는 Set 을 못 담으므로 정렬된 배열로 저장한다. 끄면 그 프로바이더의 *사용량 조회*와
+    /// *고유 한도 조회*(Codex 는 `codex app-server` 를 띄운다 — 그 바이너리가 없거나 막힌 사용자는
+    /// 이 실패를 끄고 싶어 한다)가 모두 멈추고, 스냅샷을 안 만들어 탭·companion 에서도 빠진다.
+    private(set) var disabledProviderIDs: Set<String> {
+        didSet { defaults.set(Array(disabledProviderIDs).sorted(), forKey: "disabledProviderIDs") }
+    }
+
+    func isProviderEnabled(_ id: String) -> Bool { !disabledProviderIDs.contains(id) }
+
+    /// 프로바이더 하나를 켜고 끈다. 켜면 즉시 refresh(데이터 노출), 끄면 그 스냅샷을 지우고
+    /// 고유 한도(Claude/Codex)를 비운 뒤 refresh — 다음 refresh 가 그 프로바이더를 재조립하지 않는다.
+    func setProvider(_ id: String, enabled: Bool) {
+        if enabled { disabledProviderIDs.remove(id) } else { disabledProviderIDs.insert(id) }
+        if !enabled {
+            snapshots.removeAll { $0.providerID == id }
+            if id == "claude_code" { limits = nil; limitsAvailable = false; limitsAuthExpired = false }
+            if id == "codex" { codexLimits = nil }
+        }
+        Task { await refresh() }
+    }
+
+    /// 이번 refresh 에서 실제로 조회할 프로바이더 — 등록분에서 사용자가 끈 것을 뺀 것.
+    private var activeProviders: [any UsageProvider] { providers.filter { isProviderEnabled($0.id) } }
+
+    /// 등록된 모든 프로바이더의 (id, 표시명) — 설정 화면 토글 목록을 그린다.
+    var allProviderInfo: [(id: String, displayName: String)] { providers.map { ($0.id, $0.displayName) } }
+
     /// `last-snapshot.json` shape version — bump when a key changes meaning or disappears
     /// (adding keys is backward compatible and does not bump it).
     static let snapshotSchemaVersion = 2
@@ -429,6 +457,7 @@ final class UsageStore {
         floatingPetSize = d.object(forKey: "floatingPetSize") as? Double ?? 96
         floatingPetBubbleAlerts = d.object(forKey: "floatingPetBubbleAlerts") as? Bool ?? true
         disableKeychainAccess = d.object(forKey: "disableKeychainAccess") as? Bool ?? false
+        disabledProviderIDs = Set(d.stringArray(forKey: "disabledProviderIDs") ?? [])
 
         reschedule()
 
@@ -525,7 +554,7 @@ final class UsageStore {
             let errorDescription: String?
         }
         await withTaskGroup(of: DailyOutcome.self) { group in
-            for provider in providers {
+            for provider in activeProviders {
                 group.addTask {
                     do {
                         let today = try await provider.fetchDaily()
@@ -546,7 +575,7 @@ final class UsageStore {
         }
 
         var newSnapshots: [ProviderSnapshot] = []
-        for provider in providers {
+        for provider in activeProviders {
             // 날짜 가드: 이전 스냅샷의 어제 데이터는 유지하지 않는다 (자정 동결 방지)
             var prevToday: DailyUsage?
             var prevBlock: BlockUsage?
@@ -600,7 +629,7 @@ final class UsageStore {
 
         // ── Phase 2: 블록/주월 누적 상세 (best effort) — 실패 시 이전 값 유지
         await withTaskGroup(of: (String, ProviderEnrichment).self) { group in
-            for provider in providers {
+            for provider in activeProviders {
                 group.addTask { (provider.id, await provider.fetchEnrichment()) }
             }
             for await (id, enrichment) in group {
@@ -611,7 +640,7 @@ final class UsageStore {
                     // 미사용 프로바이더까지 탭이 떠서 "안 썼는데 왜 뜨지" 회귀가 난다. 블록이 있을 때만
                     // 그 시점의 주/월도 함께 보존한다.
                     let hasActiveBlock = enrichment.blocksOK && enrichment.activeBlock != nil
-                    if hasActiveBlock, let provider = providers.first(where: { $0.id == id }) {
+                    if hasActiveBlock, let provider = activeProviders.first(where: { $0.id == id }) {
                         snapshots.append(ProviderSnapshot(
                             providerID: id, displayName: provider.displayName, today: nil,
                             activeBlock: enrichment.activeBlock,
@@ -631,7 +660,13 @@ final class UsageStore {
         }
 
         // ── 한도 조회 (Keychain 프롬프트로 블로킹될 수 있어 마지막)
-        if disableKeychainAccess {
+        // 공식 한도는 프로바이더 고유 동작이라 id 로 명시 분기한다(확장 규약이 허용하는 유일한 리터럴 분기).
+        if !isProviderEnabled("claude_code") {
+            limits = nil
+            limitsAvailable = false
+            limitsAuthExpired = false
+            AppLog.write("claude limits skipped: provider disabled")
+        } else if disableKeychainAccess {
             limits = nil
             limitsAvailable = false
             limitsAuthExpired = false   // 조회 자체를 안 하므로 "세션 만료" 안내는 무의미 → 해제
@@ -655,7 +690,13 @@ final class UsageStore {
                 AppLog.write("limits unavailable: \(error)")
             }
         }
-        await refreshCodexLimits()
+        // Codex 공식 한도는 `codex app-server` 자식 프로세스를 띄운다 — 끈 사용자(예: Codex 바이너리가
+        // 없거나 서명이 막힌 경우)에겐 이 조회 자체가 실패/다이얼로그의 원인이라 아예 건너뛴다.
+        if isProviderEnabled("codex") {
+            await refreshCodexLimits()
+        } else {
+            codexLimits = nil
+        }
         await refreshProviderStatuses()
 
         checkLimitAlerts()

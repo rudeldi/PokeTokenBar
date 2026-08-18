@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var launchAtLoginError: String?
     @State private var reportError: String?
     @State private var advancedExpanded = false
+    @State private var providersExpanded = false
     @State private var isCheckingUpdate = false
     @State private var didCheckUpdate = false
     private var l: L { companion.l }
@@ -40,6 +41,7 @@ struct SettingsView: View {
                     menuBarGroup(store)
                     floatingPetGroup(store)
                     notificationsGroup(store)
+                    providersGroup(store)
                     updateGroup(store)
                     transferGroup(store)
                     advancedGroup(store)
@@ -385,6 +387,45 @@ struct SettingsView: View {
                 Text(reportError)
                     .font(.caption2).foregroundStyle(.orange).textSelection(.enabled)
                     .padding(.horizontal, 12).padding(.bottom, 6)
+            }
+        }
+    }
+
+    // MARK: 제공자 선택 (조회 대상 on/off)
+
+    @ViewBuilder
+    private func providersGroup(_ store: UsageStore) -> some View {
+        settingsSection(l.providersSectionTitle) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { providersExpanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.forward")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(providersExpanded ? 90 : 0))
+                    Text(l.providersDisclosureLabel)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+
+            if providersExpanded {
+                Text(l.providersHint)
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12).padding(.bottom, 6)
+                ForEach(store.allProviderInfo, id: \.id) { info in
+                    Divider()
+                    groupRow {
+                        Text(info.displayName)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { store.isProviderEnabled(info.id) },
+                            set: { store.setProvider(info.id, enabled: $0) }))
+                            .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                }
             }
         }
     }

@@ -98,6 +98,14 @@ struct L {
     var menuBarSectionTitle: String { t("메뉴바에 표시", "Show in menu bar", "メニューバーに表示", "Mostrar en la barra de menús") }
     var advancedSectionTitle: String { t("고급", "Advanced", "詳細", "Avanzado") }
     var advancedDisclosureLabel: String { t("고급 설정 · 진단", "Advanced · diagnostics", "詳細設定・診断", "Avanzado · diagnóstico") }
+    var providersSectionTitle: String { t("제공자", "Providers", "プロバイダー", "Proveedores") }
+    var providersDisclosureLabel: String { t("조회할 제공자 선택", "Choose which providers to query", "照会するプロバイダーを選択", "Elige qué proveedores consultar") }
+    var providersHint: String {
+        t("끈 제공자는 조회하지 않고 탭·집계에서도 빠집니다.",
+          "Disabled providers aren't queried and drop from tabs and totals.",
+          "無効にしたプロバイダーは照会されず、タブや合計からも除外されます。",
+          "Los proveedores desactivados no se consultan y desaparecen de las pestañas y los totales.")
+    }
     var aboutSupportSectionTitle: String { t("정보 & 지원", "About & Support", "情報とサポート", "Acerca de y soporte") }
     var quit: String { t("종료", "Quit", "終了", "Salir") }
 

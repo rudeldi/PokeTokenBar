@@ -20,6 +20,11 @@ read_when:
 - **프로바이더 고유 동작만 `providerID` 로 명시 분기**: 공식 한도(Claude=HTTP·Codex=프로세스),
   5h forecast·"현재 블록" 행처럼 *특정 프로바이더에만 존재하는* 기능만 id 로 조건 분기한다.
   범용 경로에 `== "claude_code"` 류 리터럴 분기를 추가하는 건 금지.
+- **프로바이더 on/off 를 존중하라 — 특히 고유 한도 조회.** 사용자가 끈 프로바이더는
+  `UsageStore.activeProviders` 필터로 사용량 루프에서 자동으로 빠지지만, id 로 분기하는 *고유 한도
+  조회*는 별도 경로라 자동으로 안 빠진다. 새 프로바이더에 공식 한도(HTTP·자식 프로세스 등)를 붙이면
+  그 조회를 `isProviderEnabled("<id>")` 로 감싸라 — 특히 Codex 처럼 자식 프로세스를 띄우는 경우, 끈
+  사용자에게 그 spawn 자체가 실패·다이얼로그의 원인이 된다.
 - **버전매니저/설치경로 추가** = `BinaryLocator.commonToolDirectories()` 한 곳에만 추가한다
   (탐색·자식 프로세스 PATH 보강이 이 단일 소스를 공유).
 - **로그 스캔 루트 추가** = `LocalUsageReader.claudeProjectRoots` 같은 프로바이더별 루트 목록 한 곳에만
