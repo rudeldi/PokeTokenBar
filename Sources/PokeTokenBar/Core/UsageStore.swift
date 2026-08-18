@@ -109,6 +109,10 @@ final class UsageStore {
         }
     }
 
+    /// `last-snapshot.json` shape version — bump when a key changes meaning or disappears
+    /// (adding keys is backward compatible and does not bump it).
+    static let snapshotSchemaVersion = 2
+
     static let intervalPresets: [(label: String, value: TimeInterval)] = [
         ("수동", 0), ("1분", 60), ("2분", 120), ("5분", 300), ("15분", 900),
     ]
@@ -590,7 +594,7 @@ final class UsageStore {
             lastErrorDescription = errors.joined(separator: " / ")
             if lastUpdated == nil && !snapshots.isEmpty { lastUpdated = Date() }
         }
-        writeParitySnapshot()
+        writeUsageSnapshot()
         AppLog.write("phase1 done total=\(todayTotalTokens) errors=\(errors.isEmpty ? "none" : errors.joined(separator: " | "))")
         handleEmptyUsageRetry(schedule: scheduleEmptyRetry, hasErrors: !errors.isEmpty)
 
@@ -655,7 +659,7 @@ final class UsageStore {
         await refreshProviderStatuses()
 
         checkLimitAlerts()
-        writeParitySnapshot()
+        writeUsageSnapshot()
         let summary = snapshots.map { "\($0.providerID):\($0.today?.date ?? "nil")=\($0.todayTotalTokens)" }
             .joined(separator: ", ")
         AppLog.write("refresh done [\(summary)]")
@@ -879,6 +883,7 @@ final class UsageStore {
     /// Notification Center and/or the floating-pet bubble under independent gates.
     private func checkLimitAlerts() {
         let windows = buildLimitWindows()
+            .map { (key: $0.key, name: $0.name, utilization: $0.utilization) }
         let alerts = Self.evaluateLimitAlerts(
             windows: windows, warn: warnThreshold, crit: critThreshold, tiers: &notifiedTier)
         guard !alerts.isEmpty else { return }
@@ -891,48 +896,69 @@ final class UsageStore {
         }
     }
 
-    /// (unique key, display name, utilization) for every window the popover shows as a limit row.
-    private func buildLimitWindows() -> [(key: String, name: String, utilization: Double)] {
+    /// One limit row as the popover shows it. `resetsAt` is carried for the snapshot export only —
+    /// alert evaluation ignores it, and volatile reset stamps must never enter an alert key
+    /// (a rolling weekly window changes `resets_at` on every fetch and would re-arm the alert).
+    struct LimitWindowInfo: Sendable {
+        let key: String
+        let name: String
+        let utilization: Double
+        let resetsAt: Date?
+    }
+
+    /// Every window the popover shows as a limit row. Single source for alerts and export, so the
+    /// percentage an external consumer reads can never drift from the one the app warns on.
+    private func buildLimitWindows() -> [LimitWindowInfo] {
         let l = L(localizationLanguage)
-        var windows: [(key: String, name: String, utilization: Double)] = []
+        var windows: [LimitWindowInfo] = []
         if let limits {
             if let u = limits.fiveHour?.utilization {
-                windows.append(("claude.fiveHour", l.claudeFiveHour, u))
+                windows.append(LimitWindowInfo(key: "claude.fiveHour", name: l.claudeFiveHour,
+                                              utilization: u, resetsAt: limits.fiveHour?.resetDate))
             }
             if let u = limits.sevenDay?.utilization {
-                windows.append(("claude.sevenDay", l.claudeWeekly, u))
+                windows.append(LimitWindowInfo(key: "claude.sevenDay", name: l.claudeWeekly,
+                                              utilization: u, resetsAt: limits.sevenDay?.resetDate))
             }
             if let u = limits.sevenDayOpus?.utilization {
-                windows.append(("claude.sevenDayOpus", "Claude \(l.weeklyOpus)", u))
+                windows.append(LimitWindowInfo(key: "claude.sevenDayOpus", name: "Claude \(l.weeklyOpus)",
+                                              utilization: u, resetsAt: limits.sevenDayOpus?.resetDate))
             }
             if let u = limits.sevenDaySonnet?.utilization {
-                windows.append(("claude.sevenDaySonnet", "Claude \(l.weeklySonnet)", u))
+                windows.append(LimitWindowInfo(key: "claude.sevenDaySonnet", name: "Claude \(l.weeklySonnet)",
+                                              utilization: u, resetsAt: limits.sevenDaySonnet?.resetDate))
             }
             // 모델별 주간(weekly_scoped) 등 — 팝오버는 표시하나 알림엔 빠져 있던 창(누락 수정).
             // key 에 인덱스를 붙여 동일 kind/model 이 중복돼도 서로 안 덮어쓰게 한다.
             for (i, entry) in limits.scopedLimitEntries.enumerated() {
                 guard let u = entry.percent else { continue }
                 let model = entry.scope?.model?.displayName
-                windows.append(("claude.scoped.\(entry.kind ?? "?").\(model ?? "?").\(i)",
-                                "Claude \(l.claudeLimitEntry(kind: entry.kind, model: model))", u))
+                windows.append(LimitWindowInfo(
+                    key: "claude.scoped.\(entry.kind ?? "?").\(model ?? "?").\(i)",
+                    name: "Claude \(l.claudeLimitEntry(kind: entry.kind, model: model))",
+                    utilization: u, resetsAt: entry.resetDate))
             }
         }
         for bucket in codexLimits?.visibleSnapshots ?? [] {
             let bucketKey = bucket.limitId ?? bucket.limitName ?? "codex"   // bucket 유일 식별
             let bucketName = bucket.bucketDisplayName                       // "Codex" / "Codex other" 등
             if let primary = bucket.primary {
-                windows.append(("codex.\(bucketKey).primary",
-                                "\(bucketName) \(l.codexWindow(primary.windowDurationMins))",
-                                Double(primary.usedPercent)))
+                windows.append(LimitWindowInfo(
+                    key: "codex.\(bucketKey).primary",
+                    name: "\(bucketName) \(l.codexWindow(primary.windowDurationMins))",
+                    utilization: Double(primary.usedPercent), resetsAt: primary.resetDate))
             }
             if let secondary = bucket.secondary {
-                windows.append(("codex.\(bucketKey).secondary",
-                                "\(bucketName) \(l.codexWindow(secondary.windowDurationMins))",
-                                Double(secondary.usedPercent)))
+                windows.append(LimitWindowInfo(
+                    key: "codex.\(bucketKey).secondary",
+                    name: "\(bucketName) \(l.codexWindow(secondary.windowDurationMins))",
+                    utilization: Double(secondary.usedPercent), resetsAt: secondary.resetDate))
             }
             if let individual = bucket.individualLimit {
-                windows.append(("codex.\(bucketKey).individual",
-                                l.codexPersonalLimit, Double(individual.usedPercent)))
+                windows.append(LimitWindowInfo(
+                    key: "codex.\(bucketKey).individual", name: l.codexPersonalLimit,
+                    utilization: Double(individual.usedPercent),
+                    resetsAt: Date(timeIntervalSince1970: TimeInterval(individual.resetsAt))))
             }
         }
         return windows
@@ -965,29 +991,95 @@ final class UsageStore {
         }
     }
 
-    // MARK: parity-check.sh 용 스냅샷 파일
+    // MARK: 스냅샷 파일 (parity-check.sh + 외부 소비자)
 
-    private func writeParitySnapshot() {
+    /// `last-snapshot.json` — the app's local read-only interface. `parity-check.sh` consumes
+    /// `todayTotalTokens`/`providers[].totalTokens`; everything else exists so external displays
+    /// (e.g. a desk gadget) can render usage without re-implementing the log parsing.
+    ///
+    /// Additive only: keys are added, never renamed or removed, and `schemaVersion` lets a consumer
+    /// detect a shape it does not know. Optional sub-objects are omitted rather than written as null,
+    /// so `if (obj.activeBlock)` is a valid presence check.
+    ///
+    /// Official limit percentages come from `buildLimitWindows()` — the same source the alert
+    /// pipeline uses — so an external display can never show a different number than the app.
+    private func writeUsageSnapshot() {
         // .app 번들에서만 기록 — 테스트가 실제 사용자 데이터 디렉토리의 스냅샷을 덮어쓰지 않도록.
         guard AppEnv.isBundledApp else { return }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PokeTokenBar")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let iso = ISO8601DateFormatter()
+
+        func periodPayload(_ period: PeriodUsage, reportsCost: Bool) -> [String: Any] {
+            var out: [String: Any] = ["period": period.period, "totalTokens": period.totalTokens]
+            if reportsCost { out["totalCost"] = period.totalCost }
+            return out
+        }
+
         var providerEntries: [[String: Any]] = []
         for snapshot in snapshots {
-            providerEntries.append([
+            var entry: [String: Any] = [
                 "id": snapshot.providerID,
+                "displayName": snapshot.displayName,
                 "date": snapshot.today?.date ?? "",
                 "totalTokens": snapshot.todayTotalTokens,
-            ])
+                "reportsCost": snapshot.reportsCost,
+                "fetchedAt": iso.string(from: snapshot.fetchedAt),
+            ]
+            if let today = snapshot.today {
+                entry["inputTokens"] = today.inputTokens
+                entry["outputTokens"] = today.outputTokens
+                entry["cacheCreationTokens"] = today.cacheCreationTokens
+                entry["cacheReadTokens"] = today.cacheReadTokens
+                if snapshot.reportsCost { entry["totalCost"] = today.totalCost }
+            }
+            if let block = snapshot.activeBlock {
+                var payload: [String: Any] = [
+                    "totalTokens": block.totalTokens,
+                    "isActive": block.isActive,
+                ]
+                if !block.startTime.isEmpty { payload["startTime"] = block.startTime }
+                if !block.endTime.isEmpty { payload["endTime"] = block.endTime }
+                if let perMinute = block.tokensPerMinute { payload["tokensPerMinute"] = perMinute }
+                if snapshot.reportsCost { payload["costUSD"] = block.costUSD }
+                entry["activeBlock"] = payload
+            }
+            if let week = snapshot.weekTotal {
+                entry["week"] = periodPayload(week, reportsCost: snapshot.reportsCost)
+            }
+            if let month = snapshot.monthTotal {
+                entry["month"] = periodPayload(month, reportsCost: snapshot.reportsCost)
+            }
+            providerEntries.append(entry)
         }
-        let payload: [String: Any] = [
-            "generatedAt": ISO8601DateFormatter().string(from: Date()),
+
+        var limitEntries: [[String: Any]] = []
+        for window in buildLimitWindows() {
+            var entry: [String: Any] = [
+                "key": window.key,
+                "name": window.name,
+                "utilization": window.utilization,
+            ]
+            if let resetsAt = window.resetsAt { entry["resetsAt"] = iso.string(from: resetsAt) }
+            limitEntries.append(entry)
+        }
+
+        var payload: [String: Any] = [
+            "schemaVersion": Self.snapshotSchemaVersion,
+            "generatedAt": iso.string(from: Date()),
             "todayTotalTokens": todayTotalTokens,
             "menuTitle": menuTitle,
             "providers": providerEntries,
+            "limits": limitEntries,
+            "limitsAvailable": limitsAvailable,
             "lastError": lastErrorDescription ?? "",
         ]
+        // Flat-rate-only setups report no spend — omit rather than write a misleading 0.
+        if showsCost { payload["todayTotalCost"] = todayCostTotal }
+        if let lastUpdated { payload["lastUpdated"] = iso.string(from: lastUpdated) }
+        if let plan = limits?.planDisplay { payload["plan"] = plan }
+
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: dir.appendingPathComponent("last-snapshot.json"), options: .atomic)
         }
