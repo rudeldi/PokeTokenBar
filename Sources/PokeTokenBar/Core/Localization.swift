@@ -433,6 +433,28 @@ struct L {
           "Claude の認証情報にアカウントのサインインが含まれていません。Claude Code で `/login` を実行して再度サインインすると上限が表示されます。",
           "Tu credencial de Claude no tiene una sesión de cuenta asociada. Ejecuta `/login` en Claude Code para volver a iniciar sesión y ver los límites.")
     }
+    /// 저장된 자격증명 자체가 만료된 경우 — 갱신 버튼으로는 못 고친다(재발급은 Claude Code 만).
+    /// 만료 시각을 알면 괄호로 덧붙여 "오래됐다"를 분명히 한다.
+    func limitRefreshCredentialExpired(_ expiresAt: Date?) -> String {
+        let when: String
+        if let expiresAt {
+            let f = DateFormatter()
+            f.locale = lang.displayLocale
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            when = t(" (\(f.string(from: expiresAt)) 만료)",
+                     " (expired \(f.string(from: expiresAt)))",
+                     " (\(f.string(from: expiresAt)) 期限切れ)",
+                     " (expiró el \(f.string(from: expiresAt)))")
+        } else {
+            when = ""
+        }
+        return t(
+            "Claude 자격증명이 만료됐어요\(when). 갱신 버튼으로는 안 풀려요 — 터미널에서 `claude` 를 한 번 실행하면 토큰이 재발급됩니다.",
+            "Your Claude credential has expired\(when). The refresh button can't fix this — run `claude` in a terminal once to renew the token.",
+            "Claude の認証情報が期限切れです\(when)。更新ボタンでは解決できません — ターミナルで `claude` を一度実行するとトークンが再発行されます。",
+            "Tu credencial de Claude ha expirado\(when). El botón de actualizar no puede arreglarlo — ejecuta `claude` en una terminal una vez para renovar el token.")
+    }
     var limitRefreshGeneric: String {
         t("Claude 한도 조회에 실패했어요. 잠시 후 다시 시도하세요.",
           "Couldn't fetch Claude limits. Please try again shortly.",

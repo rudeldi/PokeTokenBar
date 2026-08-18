@@ -9,6 +9,10 @@ enum LimitsError: Error {
     /// 자격증명은 읽혔지만 Claude 계정 OAuth(`claudeAiOauth`)가 없다 — MCP 서버 OAuth 상태만 들어있는 경우.
     /// Claude Code 2.1.x 에서 관측된다. 형식 오류가 아니라 재로그인이 필요한 상태라 따로 구분한다.
     case credentialMissingAccountOAuth
+    /// 저장된 자격증명은 읽혔지만 그 access token 이 이미 만료됐다(`expiresAt` 경과).
+    /// 이 앱은 refresh token 교환을 하지 않으므로(재발급은 Claude Code 만) 서버에 보내봐야 401 이다.
+    /// 갱신 버튼을 눌러도 풀리지 않는 상태(=CLI 재실행 필요)를 401 과 구분해 안내하기 위해 따로 둔다.
+    case credentialExpired(expiresAt: Date?)
     case httpStatus(Int)
     /// 429 — 서버가 지정한 Retry-After(초, 없으면 nil). 폴링 백오프 판단에 사용.
     case rateLimited(retryAfter: TimeInterval?)
@@ -83,8 +87,7 @@ private actor OAuthAccessTokenCache {
 
         // 파일 크리덴셜(~/.claude/.credentials.json) — 키체인 무관, 프롬프트 없음.
         if let credential = try Self.readClaudeCredentialsFile() {
-            cachedCredential = credential
-            return credential.accessToken
+            return try accept(credential)
         }
 
         // 자동(타이머) 경로는 Claude Keychain 을 일절 읽지 않는다. no-UI 쿼리(kSecUseAuthenticationUIFail
@@ -104,11 +107,21 @@ private actor OAuthAccessTokenCache {
         // 사용자 동작 경로: 무프롬프트로 먼저 시도(과거 '항상 허용'했다면 조용히 성공), 안 되면 프롬프트를
         // 동반해 읽어 최초 1회 '항상 허용'을 유도한다.
         if let credential = Self.readClaudeKeychainSilently() {
-            cachedCredential = credential
-            return credential.accessToken
+            return try accept(credential)
         }
-        let credential = try Self.readClaudeKeychain(allowKeychainPrompt: true)
-        cachedCredential = credential
+        return try accept(try Self.readClaudeKeychain(allowKeychainPrompt: true))
+    }
+
+    /// 읽어온 자격증명을 캐시하고 access token 을 돌려준다. 단, 저장된 토큰이 **이미 만료**됐으면
+    /// 서버에 보내봐야 401 이므로 보내지 않고 `credentialExpired` 로 즉시 알린다. 이 앱은 refresh
+    /// token 교환을 하지 않으므로(재발급은 Claude Code 만) 만료 토큰은 여기서 끝이다 — 갱신 버튼을
+    /// 반복해도 안 풀리는 상태를 명확한 안내로 바꾸고, 무의미한 네트워크 왕복도 아낀다.
+    /// (만료 판정에 쓰는 `expiresAt` 이 없으면 `isExpired` 는 false → 정상 경로로 진행.)
+    private func accept(_ credential: OAuthCredentialData.Credential) throws -> String {
+        cachedCredential = credential   // planInfo() 용 — 만료여도 플랜 표시엔 무해.
+        if credential.isExpired {
+            throw LimitsError.credentialExpired(expiresAt: credential.expiresAt)
+        }
         return credential.accessToken
     }
 

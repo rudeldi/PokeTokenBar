@@ -707,8 +707,14 @@ final class UsageStore {
     /// 401/403(세션 만료)면 auth-expired 플래그를 세운다. 다른 오류(네트워크·키체인 잠금 등)는
     /// 만료가 아니므로 건드리지 않는다 — 오탐으로 "세션 만료" 안내를 띄우지 않기 위함.
     private func updateAuthExpired(from error: any Error) {
-        if case LimitsError.httpStatus(let status) = error, status == 401 || status == 403 {
+        switch error {
+        case LimitsError.httpStatus(let status) where status == 401 || status == 403:
             limitsAuthExpired = true
+        case LimitsError.credentialExpired:
+            // 저장된 토큰이 만료돼 서버에 보내기도 전에 걸렀다 — 서버 401 과 같은 "세션 만료" 상태다.
+            limitsAuthExpired = true
+        default:
+            break
         }
     }
 
@@ -748,6 +754,8 @@ final class UsageStore {
             return l.limitRefreshNoCredential
         case .credentialMissingAccountOAuth:
             return l.limitRefreshReauthNeeded
+        case .credentialExpired(let expiresAt):
+            return l.limitRefreshCredentialExpired(expiresAt)
         case .keychainInteractionNotAllowed, .keychainAccessDisabled:
             return l.limitRefreshGeneric
         }
