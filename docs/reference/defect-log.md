@@ -181,6 +181,15 @@ read_when:
   파싱 실패를 형식 오류로 뭉뚱그리면 "재로그인하면 된다"를 안내 못 해 한도 섹션이 원인 불명으로 사라진다.
   → `LimitsError.credentialMissingAccountOAuth` 로 구분해 재로그인 안내를 띄운다
   (`OAuthCredentialData.isAccountOAuthMissing`).
+- **로컬 신호로 실패가 확실하면 요청을 보내지 말고, 갱신으로 못 고치는 상태를 401 과 구분하라.**
+  저장된 자격증명의 access token 이 이미 만료(`expiresAt` 경과)면 서버에 보내봐야 401 이다. 그런데 이 앱은
+  refresh token 교환을 하지 않으므로(재발급은 Claude Code 만) **갱신 버튼을 아무리 눌러도** 같은 만료
+  토큰을 다시 보내 계속 401 이다 — 사용자는 왜 안 되는지 모른 채 갇힌다(실측: keychain 항목 mdat 이 두 달
+  전, 데스크톱 앱으로 갈아탄 사용자). 서버 왕복 전에 `expiresAt` 로 걸러 `LimitsError.credentialExpired`
+  로 바꾸고(무의미한 폴 왕복도 절감), 안내를 "CLI 를 한 번 실행해 재발급하라"로 명확히 한다
+  (`OAuthAccessTokenCache.accept`). `expiresAt` 이 없으면 `isExpired=false` 라 정상 경로 유지 —
+  서버측 거부(토큰 취소 등)는 기존 401 처리로 그대로 흐른다. 회귀 가드:
+  `testLimitsAuthExpiredSetOnCredentialExpired` + `testFriendlyLimitErrorMapping`.
 
 ## 동시성
 
